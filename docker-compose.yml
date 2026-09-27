@@ -1,11 +1,21 @@
 services:
-  mysql:
+  mysql_a:
     image: mysql:8.0
     environment:
       MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: outbox_db
-    ports:
-      - "3306:3306"
+      MYSQL_DATABASE: node_a_db
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  mysql_b:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: node_b_db
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
       interval: 5s
@@ -15,6 +25,9 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -25,30 +38,100 @@ services:
       retries: 20
       start_period: 10s
 
-  api:
+  migrate_a:
+    build: .
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: mysql+pymysql://root:root@mysql_a:3306/node_a_db
+    depends_on:
+      mysql_a:
+        condition: service_healthy
+
+  migrate_b:
+    build: .
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: mysql+pymysql://root:root@mysql_b:3306/node_b_db
+    depends_on:
+      mysql_b:
+        condition: service_healthy
+
+  api_a:
     build: .
     restart: always
     command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
+    environment:
+      NODE_ID: node_a
+      DATABASE_URL: mysql+pymysql://root:root@mysql_a:3306/node_a_db
+      RABBITMQ_HOST: rabbitmq
     ports:
       - "8000:8000"
     depends_on:
-      mysql:
-        condition: service_healthy
+      migrate_a:
+        condition: service_completed_successfully
 
-  worker:
+  api_b:
+    build: .
+    restart: always
+    command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
+    environment:
+      NODE_ID: node_b
+      DATABASE_URL: mysql+pymysql://root:root@mysql_b:3306/node_b_db
+      RABBITMQ_HOST: rabbitmq
+    ports:
+      - "8001:8000"
+    depends_on:
+      migrate_b:
+        condition: service_completed_successfully
+
+  worker_a:
     build: .
     command: python worker.py
+    environment:
+      NODE_ID: node_a
+      DATABASE_URL: mysql+pymysql://root:root@mysql_a:3306/node_a_db
+      RABBITMQ_HOST: rabbitmq
     depends_on:
-      mysql:
-        condition: service_healthy
+      migrate_a:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
 
-  receiver:
+  worker_b:
+    build: .
+    command: python worker.py
+    environment:
+      NODE_ID: node_b
+      DATABASE_URL: mysql+pymysql://root:root@mysql_b:3306/node_b_db
+      RABBITMQ_HOST: rabbitmq
+    depends_on:
+      migrate_b:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  receiver_a:
     build: .
     command: python receiver.py
+    environment:
+      NODE_ID: node_a
+      DATABASE_URL: mysql+pymysql://root:root@mysql_a:3306/node_a_db
+      RABBITMQ_HOST: rabbitmq
     depends_on:
-      mysql:
+      migrate_a:
+        condition: service_completed_successfully
+      rabbitmq:
         condition: service_healthy
+
+  receiver_b:
+    build: .
+    command: python receiver.py
+    environment:
+      NODE_ID: node_b
+      DATABASE_URL: mysql+pymysql://root:root@mysql_b:3306/node_b_db
+      RABBITMQ_HOST: rabbitmq
+    depends_on:
+      migrate_b:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy

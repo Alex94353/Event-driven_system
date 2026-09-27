@@ -1,3 +1,4 @@
+﻿import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -8,15 +9,13 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from models import Base, Order, Outbox
+from config import get_database_url
+from models import Order, Outbox
 
 
-# Строка подключения к MySQL в вашем Docker-контейнере
-# Формат: mysql+драйвер://пользователь:пароль@хост:порт/имя_базы
-DATABASE_URL = "mysql+pymysql://root:root@mysql:3306/outbox_db"
+DATABASE_URL = get_database_url()
+engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 
-# Движок для общения с БД (echo=True будет выводить SQL-запросы в консоль для отладки)
-engine = create_engine(DATABASE_URL, echo=True)
 
 def wait_for_db(max_retries: int = 30, delay_seconds: int = 2):
     last_error = None
@@ -32,30 +31,26 @@ def wait_for_db(max_retries: int = 30, delay_seconds: int = 2):
     raise RuntimeError("MySQL did not become ready in time") from last_error
 
 
-# Жизненный цикл приложения: выполняется при старте сервера
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     wait_for_db()
-    # Берем все модели из Base и создаем под них таблицы в MySQL
-    Base.metadata.create_all(bind=engine)
-    print("Таблицы успешно созданы в MySQL!")
     yield
 
-# Инициализируем FastAPI
-app = FastAPI(lifespan=lifespan, title="Node A - Distributed System")
 
-# Простейший эндпоинт для проверки работы
+app = FastAPI(
+    lifespan=lifespan,
+    title=f"Node {os.getenv('NODE_ID', 'node_a')} - Distributed System",
+)
+
+
 @app.get("/")
 def health_check():
     return {"status": "ok", "message": "Node is running and connected to DB"}
 
 
-
-
-# Фабрика сессий для подключения к БД
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Зависимость для получения сессии БД в каждом запросе
+
 def get_db():
     db = SessionLocal()
     try:
@@ -63,38 +58,71 @@ def get_db():
     finally:
         db.close()
 
-# Pydantic-схема для проверки того, что нам присылают по API
+
 class OrderCreate(BaseModel):
     item_name: str
     price: int
 
-# Тот самый эндпоинт с транзакцией Outbox
+
+class OrderUpdate(BaseModel):
+    item_name: str
+    price: int
+
+
+def add_outbox_event(db: Session, order: Order, event_type: str) -> Outbox:
+    event = Outbox(
+        event_id=str(uuid.uuid4()),
+        aggregate_id=str(order.id),
+        version=order.version,
+        event_type=event_type,
+        payload={
+            "order_id": order.id,
+            "item_name": order.item_name,
+            "price": order.price,
+        },
+    )
+    db.add(event)
+    return event
+
+
 @app.post("/orders/")
 def create_order(order: OrderCreate, db: Session = Depends(get_db)):
-    # 1. Создаем саму бизнес-запись (Заказ)
     new_order = Order(item_name=order.item_name, price=order.price)
     db.add(new_order)
-    db.flush()  # flush отправляет SQL в БД, чтобы получить ID заказа, но НЕ фиксирует транзакцию
+    db.flush()
 
-    # 2. Создаем событие для отправки в RabbitMQ
-    event_payload = {
-        "order_id": new_order.id, 
-        "item_name": new_order.item_name, 
-        "price": new_order.price
-    }
-    
-    outbox_event = Outbox(
-        event_id=str(uuid.uuid4()),
-        event_type="ORDER_CREATED",
-        payload=event_payload
-    )
-    db.add(outbox_event)
-
-    # 3. Фиксируем обе записи В ОДНОЙ АТОМАРНОЙ ТРАНЗАКЦИИ
+    outbox_event = add_outbox_event(db, new_order, "ORDER_CREATED")
     db.commit()
-    
+
     return {
-        "message": "Transaction successful", 
+        "message": "Transaction successful",
         "order_id": new_order.id,
-        "event_id": outbox_event.event_id
+        "event_id": outbox_event.event_id,
     }
+
+
+@app.put("/orders/{order_id}")
+def update_order(order_id: int, order: OrderUpdate, db: Session = Depends(get_db)):
+    existing_order = db.get(Order, order_id)
+    if existing_order is None:
+        return {"error": "Order not found"}
+
+    existing_order.item_name = order.item_name
+    existing_order.price = order.price
+    existing_order.version += 1
+    outbox_event = add_outbox_event(db, existing_order, "ORDER_UPDATED")
+    db.commit()
+    return {"message": "Transaction successful", "order_id": order_id, "event_id": outbox_event.event_id}
+
+
+@app.delete("/orders/{order_id}")
+def delete_order(order_id: int, db: Session = Depends(get_db)):
+    existing_order = db.get(Order, order_id)
+    if existing_order is None:
+        return {"error": "Order not found"}
+
+    existing_order.version += 1
+    outbox_event = add_outbox_event(db, existing_order, "ORDER_DELETED")
+    db.delete(existing_order)
+    db.commit()
+    return {"message": "Transaction successful", "order_id": order_id, "event_id": outbox_event.event_id}
