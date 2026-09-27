@@ -25,4 +25,13 @@ def get_rabbitmq_url() -> str:
     return f"amqp://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}{vhost}"
 
 
+def get_node_ids() -> list[str]:
+    configured_nodes = os.getenv("NODE_IDS", "node_a,node_b,node_c")
+    return list(dict.fromkeys(node.strip() for node in configured_nodes.split(",") if node.strip()))
+
+
+def get_peer_nodes(node_id: str) -> list[str]:
+    return [node for node in get_node_ids() if node != node_id]
+
+
 RABBITMQ_EXCHANGE = os.getenv("RABBITMQ_EXCHANGE", "events")

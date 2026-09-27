@@ -1,48 +1,102 @@
+x-app-environment: &app-environment
+  MYSQL_USER: ${MYSQL_APP_USER:?Set MYSQL_APP_USER in .env}
+  MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in .env}
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_USER: ${RABBITMQ_USER:?Set RABBITMQ_USER in .env}
+  RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}
+  NODE_IDS: node_a,node_b,node_c
+  API_KEY: ${API_KEY:?Set API_KEY in .env}
+  MESSAGE_MAX_RETRIES: ${MESSAGE_MAX_RETRIES:-5}
+  MESSAGE_RETRY_DELAY_MS: ${MESSAGE_RETRY_DELAY_MS:-5000}
+
 services:
   mysql_a:
     image: mysql:8.0
     environment:
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: node_a_db
+      MYSQL_USER: ${MYSQL_APP_USER:?Set MYSQL_APP_USER in .env}
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in .env}
+    volumes:
+      - mysql_a_data:/var/lib/mysql
+    networks:
+      - node_a
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 15s
+    restart: unless-stopped
 
   mysql_b:
     image: mysql:8.0
     environment:
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: node_b_db
+      MYSQL_USER: ${MYSQL_APP_USER:?Set MYSQL_APP_USER in .env}
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in .env}
+    volumes:
+      - mysql_b_data:/var/lib/mysql
+    networks:
+      - node_b
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 15s
+    restart: unless-stopped
+
+  mysql_c:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: node_c_db
+      MYSQL_USER: ${MYSQL_APP_USER:?Set MYSQL_APP_USER in .env}
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:?Set MYSQL_APP_PASSWORD in .env}
+    volumes:
+      - mysql_c_data:/var/lib/mysql
+    networks:
+      - node_c
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
 
   rabbitmq:
     image: rabbitmq:3-management
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Set RABBITMQ_USER in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    networks:
+      - broker
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
       start_period: 10s
+    restart: unless-stopped
 
   migrate_a:
     build: .
     command: alembic upgrade head
     environment:
-      DATABASE_URL: mysql+pymysql://root:root@mysql_a:3306/node_a_db
+      <<: *app-environment
+      NODE_ID: node_a
+      MYSQL_HOST: mysql_a
+      MYSQL_DATABASE: node_a_db
+    networks:
+      - node_a
     depends_on:
       mysql_a:
         condition: service_healthy
@@ -51,46 +105,126 @@ services:
     build: .
     command: alembic upgrade head
     environment:
-      DATABASE_URL: mysql+pymysql://root:root@mysql_b:3306/node_b_db
+      <<: *app-environment
+      NODE_ID: node_b
+      MYSQL_HOST: mysql_b
+      MYSQL_DATABASE: node_b_db
+    networks:
+      - node_b
     depends_on:
       mysql_b:
         condition: service_healthy
 
+  migrate_c:
+    build: .
+    command: alembic upgrade head
+    environment:
+      <<: *app-environment
+      NODE_ID: node_c
+      MYSQL_HOST: mysql_c
+      MYSQL_DATABASE: node_c_db
+    networks:
+      - node_c
+    depends_on:
+      mysql_c:
+        condition: service_healthy
+
   api_a:
     build: .
-    restart: always
     command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
     environment:
+      <<: *app-environment
       NODE_ID: node_a
-      DATABASE_URL: mysql+pymysql://root:root@mysql_a:3306/node_a_db
-      RABBITMQ_HOST: rabbitmq
+      MYSQL_HOST: mysql_a
+      MYSQL_DATABASE: node_a_db
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    networks:
+      - node_a
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
     depends_on:
       migrate_a:
         condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
 
   api_b:
     build: .
-    restart: always
     command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
     environment:
+      <<: *app-environment
       NODE_ID: node_b
-      DATABASE_URL: mysql+pymysql://root:root@mysql_b:3306/node_b_db
-      RABBITMQ_HOST: rabbitmq
+      MYSQL_HOST: mysql_b
+      MYSQL_DATABASE: node_b_db
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
+    networks:
+      - node_b
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
     depends_on:
       migrate_b:
         condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  api_c:
+    build: .
+    command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
+    environment:
+      <<: *app-environment
+      NODE_ID: node_c
+      MYSQL_HOST: mysql_c
+      MYSQL_DATABASE: node_c_db
+    ports:
+      - "127.0.0.1:8002:8000"
+    networks:
+      - node_c
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    depends_on:
+      migrate_c:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
 
   worker_a:
     build: .
     command: python worker.py
     environment:
+      <<: *app-environment
       NODE_ID: node_a
-      DATABASE_URL: mysql+pymysql://root:root@mysql_a:3306/node_a_db
-      RABBITMQ_HOST: rabbitmq
+      MYSQL_HOST: mysql_a
+      MYSQL_DATABASE: node_a_db
+    networks:
+      - node_a
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket; assert b'worker.py' in open('/proc/1/cmdline','rb').read(); socket.create_connection((os.getenv('RABBITMQ_HOST','rabbitmq'),5672),2).close(); socket.create_connection((os.getenv('MYSQL_HOST','mysql'),3306),2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
     depends_on:
       migrate_a:
         condition: service_completed_successfully
@@ -101,11 +235,46 @@ services:
     build: .
     command: python worker.py
     environment:
+      <<: *app-environment
       NODE_ID: node_b
-      DATABASE_URL: mysql+pymysql://root:root@mysql_b:3306/node_b_db
-      RABBITMQ_HOST: rabbitmq
+      MYSQL_HOST: mysql_b
+      MYSQL_DATABASE: node_b_db
+    networks:
+      - node_b
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket; assert b'worker.py' in open('/proc/1/cmdline','rb').read(); socket.create_connection((os.getenv('RABBITMQ_HOST','rabbitmq'),5672),2).close(); socket.create_connection((os.getenv('MYSQL_HOST','mysql'),3306),2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
     depends_on:
       migrate_b:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  worker_c:
+    build: .
+    command: python worker.py
+    environment:
+      <<: *app-environment
+      NODE_ID: node_c
+      MYSQL_HOST: mysql_c
+      MYSQL_DATABASE: node_c_db
+    networks:
+      - node_c
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket; assert b'worker.py' in open('/proc/1/cmdline','rb').read(); socket.create_connection((os.getenv('RABBITMQ_HOST','rabbitmq'),5672),2).close(); socket.create_connection((os.getenv('MYSQL_HOST','mysql'),3306),2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      migrate_c:
         condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
@@ -114,9 +283,20 @@ services:
     build: .
     command: python receiver.py
     environment:
+      <<: *app-environment
       NODE_ID: node_a
-      DATABASE_URL: mysql+pymysql://root:root@mysql_a:3306/node_a_db
-      RABBITMQ_HOST: rabbitmq
+      MYSQL_HOST: mysql_a
+      MYSQL_DATABASE: node_a_db
+    networks:
+      - node_a
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket; assert b'receiver.py' in open('/proc/1/cmdline','rb').read(); socket.create_connection((os.getenv('RABBITMQ_HOST','rabbitmq'),5672),2).close(); socket.create_connection((os.getenv('MYSQL_HOST','mysql'),3306),2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
     depends_on:
       migrate_a:
         condition: service_completed_successfully
@@ -127,11 +307,65 @@ services:
     build: .
     command: python receiver.py
     environment:
+      <<: *app-environment
       NODE_ID: node_b
-      DATABASE_URL: mysql+pymysql://root:root@mysql_b:3306/node_b_db
-      RABBITMQ_HOST: rabbitmq
+      MYSQL_HOST: mysql_b
+      MYSQL_DATABASE: node_b_db
+    networks:
+      - node_b
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket; assert b'receiver.py' in open('/proc/1/cmdline','rb').read(); socket.create_connection((os.getenv('RABBITMQ_HOST','rabbitmq'),5672),2).close(); socket.create_connection((os.getenv('MYSQL_HOST','mysql'),3306),2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
     depends_on:
       migrate_b:
         condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
+
+  receiver_c:
+    build: .
+    command: python receiver.py
+    environment:
+      <<: *app-environment
+      NODE_ID: node_c
+      MYSQL_HOST: mysql_c
+      MYSQL_DATABASE: node_c_db
+    networks:
+      - node_c
+      - broker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,socket; assert b'receiver.py' in open('/proc/1/cmdline','rb').read(); socket.create_connection((os.getenv('RABBITMQ_HOST','rabbitmq'),5672),2).close(); socket.create_connection((os.getenv('MYSQL_HOST','mysql'),3306),2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    depends_on:
+      migrate_c:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+networks:
+  broker:
+    name: event-system-broker
+  node_a:
+    name: event-system-node-a
+    internal: true
+  node_b:
+    name: event-system-node-b
+    internal: true
+  node_c:
+    name: event-system-node-c
+    internal: true
+
+volumes:
+  mysql_a_data:
+  mysql_b_data:
+  mysql_c_data:
+  rabbitmq_data:
