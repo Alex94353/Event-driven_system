@@ -97,3 +97,125 @@ docker run --rm --entrypoint python event-driven-system-test -m pytest -q
 ```
 
 The unit tests cover outbox retry and replay, receiver retry/ack behavior, duplicate delivery, out-of-order events, deterministic concurrent-version resolution, and delete tombstones. The defense procedure above is the Compose integration check for network isolation, automatic recovery, manifests, and persisted volumes.
+
+## Manual demonstration checklist (PowerShell and Swagger)
+
+The following procedure reproduces the complete defense scenario on Windows. Keep the
+project directory as the current directory and do not remove volumes during the demo.
+
+### 1. Start and verify all nodes
+
+```powershell
+docker compose up --build --force-recreate -d
+docker compose ps
+
+$headers = @{ "X-API-Key" = "your API_KEY from .env" }
+Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8001/health
+Invoke-RestMethod http://localhost:8002/health
+```
+
+All API, database, RabbitMQ, worker, and receiver services should be healthy. Swagger
+is available at:
+
+- `http://localhost:8000/docs` (node A)
+- `http://localhost:8001/docs` (node B)
+- `http://localhost:8002/docs` (node C)
+
+Use the `X-API-Key` header for all operations except `GET /health`.
+
+### 2. Create on A and verify replication
+
+In Swagger on node A, execute `POST /orders/` with:
+
+```json
+{
+  "item_name": "initial-A",
+  "price": 100
+}
+```
+
+Copy the returned `record_id`, then execute `GET /manifest` on B and C. The record
+must appear on both nodes with the same UUID and checksum.
+
+### 3. Isolate B from RabbitMQ
+
+The API and MySQL of B remain available; only its broker connectivity is removed:
+
+```powershell
+foreach ($service in @("api_b", "worker_b", "receiver_b")) {
+    $id = (docker compose ps -q $service).Trim()
+    docker network disconnect event-system-broker $id
+}
+```
+
+Docker Desktop can temporarily invalidate B's host port-forward after this operation.
+Use `docker compose exec -T api_b ...` for B requests while it is isolated.
+
+### 4. Create divergent data on A and B
+
+Create another order on A through Swagger. Create the B order from inside its
+container:
+
+```powershell
+docker compose exec -T api_b python -c "import json,os,urllib.request; data=json.dumps({'item_name':'partition-B','price':220}).encode(); req=urllib.request.Request('http://127.0.0.1:8000/orders/', data=data, headers={'X-API-Key':os.environ['API_KEY'],'Content-Type':'application/json'}, method='POST'); print(urllib.request.urlopen(req).read().decode())"
+```
+
+Check B's local status. Its `pending_outbox` value must be greater than zero:
+
+```powershell
+docker compose exec -T api_b python -c "import os,urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/status',headers={'X-API-Key':os.environ['API_KEY']}); print(urllib.request.urlopen(req).read().decode())"
+```
+
+### 5. Run sync during the outage
+
+The request must fail with HTTP 503, while the outbox event remains stored:
+
+```powershell
+docker compose exec -T api_b python -c "import os,urllib.request,urllib.error; req=urllib.request.Request('http://127.0.0.1:8000/sync', data=b'', headers={'X-API-Key':os.environ['API_KEY']}, method='POST'); 
+try:
+    urllib.request.urlopen(req)
+    raise AssertionError('sync unexpectedly succeeded')
+except urllib.error.HTTPError as error:
+    print(error.code, error.read().decode())
+    assert error.code == 503"
+```
+
+### 6. Reconnect B and verify recovery
+
+```powershell
+foreach ($service in @("api_b", "worker_b", "receiver_b")) {
+    $id = (docker compose ps -q $service).Trim()
+    docker network connect event-system-broker $id
+}
+```
+
+Wait for the worker and receiver to reconnect. Compare `GET /manifest` on all
+three nodes. All missing records must be present, `pending_outbox` must be zero,
+and `count`, UUIDs, versions, and checksums must match.
+
+### 7. Replay repeatedly and check idempotency
+
+Run the following in Swagger on A, B, and C:
+
+```text
+POST /sync?replay_all=true
+```
+
+Repeat the requests several times. The manifests and record counts must remain
+unchanged. Inbox deduplication prevents duplicate business effects.
+
+### 8. Restart a node and verify persistence
+
+```powershell
+docker compose restart api_c worker_c receiver_c
+Start-Sleep -Seconds 10
+docker compose ps
+```
+
+Run `GET /manifest` and `GET /status` on C again. The records, versions,
+checksums, and `pending_outbox` value must be unchanged.
+
+Use `docker compose down` to stop the demonstration without deleting data.
+Do not use `docker compose down -v`, because it removes the MySQL and RabbitMQ
+volumes needed to demonstrate persistence.

@@ -1,7 +1,9 @@
 from logging.config import fileConfig
+import time
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.exc import OperationalError
 
 from config import get_database_url
 from models import Base
@@ -31,10 +33,21 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-    with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-        with context.begin_transaction():
-            context.run_migrations()
+    last_error = None
+    for attempt in range(1, 31):
+        try:
+            with connectable.connect() as connection:
+                context.configure(connection=connection, target_metadata=target_metadata)
+                with context.begin_transaction():
+                    context.run_migrations()
+            return
+        except OperationalError as exc:
+            last_error = exc
+            if attempt == 30:
+                raise
+            print(f"Database not ready (attempt {attempt}/30), retrying in 2s...", flush=True)
+            time.sleep(2)
+    raise RuntimeError("Database did not become ready in time") from last_error
 
 
 if context.is_offline_mode():
