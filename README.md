@@ -219,3 +219,27 @@ checksums, and `pending_outbox` value must be unchanged.
 Use `docker compose down` to stop the demonstration without deleting data.
 Do not use `docker compose down -v`, because it removes the MySQL and RabbitMQ
 volumes needed to demonstrate persistence.
+
+## Local Vue frontend
+
+The local operator console lives in `frontend/` and uses Vue 3, Vite, Element
+Plus, Pinia, and plain JavaScript. It does not require Nginx. Vite proxies the
+browser requests to the three local FastAPI nodes:
+
+- `/api/node-a` -> `http://localhost:8000`
+- `/api/node-b` -> `http://localhost:8001`
+- `/api/node-c` -> `http://localhost:8002`
+
+Start the backend with Docker Compose, then in a second terminal run:
+
+```powershell
+Set-Location frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. Vite reads `API_KEY` from the root `.env` and
+injects it into local browser requests through the proxy. The console supports
+order CRUD, node selection, health/status/manifest inspection, and manual event
+synchronization. This setup is for local demonstration only; the key is bundled
+into browser code and must not be used this way in production.
