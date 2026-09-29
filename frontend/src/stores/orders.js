@@ -16,6 +16,7 @@ export const useOrdersStore = defineStore('orders', {
       try {
         this.items = await api.listOrders(nodeId, this.includeDeleted)
       } catch (error) {
+        this.items = []
         this.error = error.message
         throw error
       } finally {
