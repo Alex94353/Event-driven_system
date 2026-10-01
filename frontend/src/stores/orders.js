@@ -4,7 +4,7 @@ import { api } from '../api'
 export const useOrdersStore = defineStore('orders', {
   state: () => ({
     items: [],
-    includeDeleted: false,
+    includeDeleted: true,
     loading: false,
     saving: false,
     error: '',
