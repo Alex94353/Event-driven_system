@@ -1,7 +1,7 @@
 import vue from '@vitejs/plugin-vue'
 import { defineConfig, loadEnv } from 'vite'
 
-// https://vite.dev/config/
+// The API key is bundled into the browser; use this configuration only for local development.
 export default defineConfig(({ mode }) => {
   const rootEnv = loadEnv(mode, '..', '')
 
