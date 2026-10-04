@@ -1,11 +1,11 @@
 FROM python:3.11-slim
 
-# Устанавливаем рабочую директорию внутри контейнера
+# Install the working directory into the container
 WORKDIR /app
 
-# Копируем файл зависимостей и устанавливаем их
+# Copy the dependencies file and install them
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь остальной код проекта
+# Copy the rest of the application code into the container
 COPY . .

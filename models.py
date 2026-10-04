@@ -6,11 +6,10 @@ from typing import Optional
 from sqlalchemy import String, Integer, JSON, Boolean
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-# Базовый класс для всех моделей
 class Base(DeclarativeBase):
     pass
 
-# Таблица для бизнес-логики (например, заказы)
+# Business records and replication metadata.
 class Order(Base):
     __tablename__ = "orders"
     
@@ -24,23 +23,23 @@ class Order(Base):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_event_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
 
-# Таблица Outbox: сюда мы в одной транзакции пишем событие, чтобы потом отправить его в RabbitMQ
+# Store events atomically with order changes.
 class Outbox(Base):
     __tablename__ = "outbox"
     
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    event_id: Mapped[str] = mapped_column(String(36), unique=True) # UUID события
+    event_id: Mapped[str] = mapped_column(String(36), unique=True)
     aggregate_id: Mapped[str] = mapped_column(String(36), nullable=False)
     origin_node: Mapped[str] = mapped_column(String(100), default="legacy", nullable=False)
     updated_by_node: Mapped[str] = mapped_column(String(100), default="legacy", nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    event_type: Mapped[str] = mapped_column(String(50))            # Например, 'ORDER_CREATED'
-    payload: Mapped[dict] = mapped_column(JSON)                    # Сами данные (JSON)
-    is_sent: Mapped[bool] = mapped_column(Boolean, default=False)  # Отправлено ли в брокер?
+    event_type: Mapped[str] = mapped_column(String(50))            # Order lifecycle event.
+    payload: Mapped[dict] = mapped_column(JSON)                    # Serialized order data.
+    is_sent: Mapped[bool] = mapped_column(Boolean, default=False)  # Set after broker confirmation.
 
-# Таблица Inbox: сюда принимающий узел пишет ID событий, которые уже обработал (для идемпотентности)
+# Track processed event IDs to prevent duplicate effects.
 class Inbox(Base):
     __tablename__ = "inbox"
     
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    event_id: Mapped[str] = mapped_column(String(36), unique=True) # UUID обработанного события
+    event_id: Mapped[str] = mapped_column(String(36), unique=True)
